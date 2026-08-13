@@ -23,7 +23,7 @@ LOGIN_URL = "https://business.teya.com/?locale=hu"
 COMPANY_ID = "24abe7e0-88fd-468a-afb6-fe362b0b79ca"
 STORE_ID = "81e77008-fc09-4a82-9c78-b5939b24a202"
 
-# ELMÚLT 14 NAP (2 HÉT) GYŰJTÉSE
+# ELMÚLT 14 NAP (2 HÉT) GYŰJTÉSE A NAPI ÉS NYERS FÁJLOKHOZ
 DAYS_BACK = 14
 
 OUTPUT_DIR = "./output"
@@ -159,41 +159,95 @@ def create_summary_excel(file_path, summary, payout_date):
         return False
 
 
-def append_to_master_summary(master_path, summary, payout_date):
+def rebuild_master_summary_from_all_files(master_path, folder_id):
+    """
+    Összegyűjti az ÖSSZES Google Drive-on és helyi mappában található napi 'amberlyn_*_Osszegzes.xlsx'
+    fájlt, és az összes visszamenőleges adatot belefoglalja a Master Összegzés fájlba!
+    A 'Dátum' oszlopba a fájlnévből származó dátum kerül.
+    """
+    print("\n[MASTER ÖSSZEGZŐ ÚJRAÉPÍTÉSE AZ ÖSSZES KORÁBBI FÁJLBÓL]")
+    service = get_drive_service()
     headers = ["Dátum", "Kifizetett Végösszeg", "Kezdeti egyenleg", "Tranzakciók bruttó", "Visszatérítések", "Chargeback", "Bankköltség / Díjak"]
-    values = [
-        payout_date, summary.get("kifizetes", "0,00 €"), summary.get("kezdeti_egyenleg", "0,00 €"),
-        summary.get("tranzakciok", "0,00 €"), summary.get("visszateritesek", "0,00 €"),
-        summary.get("chargeback", "0,00 €"), summary.get("dijak", "0,00 €")
-    ]
-    try:
-        if not os.path.exists(master_path):
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = "Master Összegzés"
-            ws.append(headers)
-            for col_num in range(1, len(headers) + 1):
-                ws.cell(row=1, column=col_num).font = Font(bold=True)
-        else:
-            wb = openpyxl.load_workbook(master_path)
-            ws = wb.active
+    
+    # dátum -> adatsor szótár
+    all_summary_rows = {}
 
-        # FELÜLÍRÁS: Ha a dátum már létezik, felülírjuk a sort
-        row_to_overwrite = None
-        for row_idx in range(2, ws.max_row + 1):
-            if ws.cell(row=row_idx, column=1).value == payout_date:
-                row_to_overwrite = row_idx
-                break
+    # 1. Beolvasás a helyi mappából (a frissen lekért 2 hét adatai)
+    if os.path.exists(OUTPUT_DIR):
+        for f_name in os.listdir(OUTPUT_DIR):
+            if f_name.startswith("amberlyn_") and f_name.endswith("_Osszegzes.xlsx") and f_name != "amberlyn_MASTER_Osszegzes.xlsx":
+                date_part = f_name.replace("amberlyn_", "").replace("_Osszegzes.xlsx", "")
+                f_path = os.path.join(OUTPUT_DIR, f_name)
+                try:
+                    wb = openpyxl.load_workbook(f_path)
+                    ws = wb.active
+                    if ws.max_row >= 2:
+                        row_vals = [ws.cell(row=2, column=col).value for col in range(1, 8)]
+                        row_vals[0] = date_part  # A dátum a fájlnévvel egyezik meg
+                        all_summary_rows[date_part] = row_vals
+                except Exception as e:
+                    print(f"      [Helyi beolvasás HIBA] {f_name}: {e}")
 
-        if row_to_overwrite:
-            for col_idx, val in enumerate(values, start=1):
-                ws.cell(row=row_to_overwrite, column=col_idx, value=val)
-        else:
-            ws.append(values)
-            
-        wb.save(master_path)
-    except Exception as e:
-        print(f"      [Master Összegzés HIBA]: {e}")
+    # 2. Beolvasás a Google Drive-ról (az ÖSSZES korábbi visszamenőleges napi összegző)
+    if service and folder_id:
+        try:
+            query = f"name contains 'amberlyn_' and name contains '_Osszegzes.xlsx' and name != 'amberlyn_MASTER_Osszegzes.xlsx' and '{folder_id}' in parents and trashed=false"
+            results = service.files().list(
+                q=query, spaces='drive', fields="files(id, name)",
+                supportsAllDrives=True, includeItemsFromAllDrives=True,
+                pageSize=1000
+            ).execute()
+
+            drive_items = results.get('files', [])
+            print(f"      [Drive Master Összegző] {len(drive_items)} db korábbi összegző fájl beazonosítva a Drive-on.")
+
+            for item in drive_items:
+                f_name = item['name']
+                date_part = f_name.replace("amberlyn_", "").replace("_Osszegzes.xlsx", "")
+
+                # Ha a helyi gyűjtésben még nincs meg (korábbi napok)
+                if date_part not in all_summary_rows:
+                    temp_path = os.path.join(OUTPUT_DIR, f"temp_{f_name}")
+                    try:
+                        request = service.files().get_media(fileId=item['id'])
+                        fh = io.FileIO(temp_path, 'wb')
+                        downloader = MediaIoBaseDownload(fh, request)
+                        done = False
+                        while not done:
+                            status, done = downloader.next_chunk()
+
+                        wb = openpyxl.load_workbook(temp_path)
+                        ws = wb.active
+                        if ws.max_row >= 2:
+                            row_vals = [ws.cell(row=2, column=col).value for col in range(1, 8)]
+                            row_vals[0] = date_part  # A dátum a fájlnévvel megegyező
+                            all_summary_rows[date_part] = row_vals
+
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                    except Exception as e:
+                        print(f"      [Drive fájl letöltés HIBA] {f_name}: {e}")
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+
+        except Exception as e:
+            print(f"      [Drive listázás HIBA]: {e}")
+
+    # 3. Master Összegző Excel fájl összeállítása dátum szerint rendezve
+    wb_master = openpyxl.Workbook()
+    ws_master = wb_master.active
+    ws_master.title = "Master Összegzés"
+    ws_master.append(headers)
+
+    for col_num in range(1, len(headers) + 1):
+        ws_master.cell(row=1, column=col_num).font = Font(bold=True)
+
+    sorted_dates = sorted(all_summary_rows.keys())
+    for d in sorted_dates:
+        ws_master.append(all_summary_rows[d])
+
+    wb_master.save(master_path)
+    print(f"      [Master Összegző SIKER] Összesen {len(all_summary_rows)} nap adata összefűzve a Master fájlba!")
 
 
 def append_to_master_raw(master_path, daily_raw_path, payout_date):
@@ -325,8 +379,7 @@ def run_pure_api_collector():
     master_sum_path = os.path.join(OUTPUT_DIR, "amberlyn_MASTER_Osszegzes.xlsx")
     master_raw_path = os.path.join(OUTPUT_DIR, "amberlyn_MASTER_Nyers.xlsx")
 
-    print("[0. LÉPÉS] KORÁBBI MASTER FÁJLOK BEOLVASÁSA A DRIVE-RÓL...")
-    download_master_file_from_drive("amberlyn_MASTER_Osszegzes.xlsx", GOOGLE_DRIVE_FOLDER_ID, master_sum_path)
+    print("[0. LÉPÉS] KORÁBBI MASTER NYERS FÁJL BEOLVASÁSA A DRIVE-RÓL...")
     download_master_file_from_drive("amberlyn_MASTER_Nyers.xlsx", GOOGLE_DRIVE_FOLDER_ID, master_raw_path)
 
     captured_token = None
@@ -372,7 +425,7 @@ def run_pure_api_collector():
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/151.0.0.0",
     }
 
-    # IDŐSZAK: Utolsó 14 nap (2 hét)
+    # IDŐSZAK: Utolsó 14 nap (2 hét) a napi kifizetésekhez
     end_date = datetime.now()
     start_date = end_date - timedelta(days=DAYS_BACK)
 
@@ -407,7 +460,6 @@ def run_pure_api_collector():
         sum_path = os.path.join(OUTPUT_DIR, summary_file_name)
 
         create_summary_excel(sum_path, summary_data, payout_date)
-        append_to_master_summary(master_sum_path, summary_data, payout_date)
 
         if payout_id:
             if generate_and_download_raw_excel(payout_id, raw_path, headers):
@@ -416,8 +468,11 @@ def run_pure_api_collector():
         upload_to_google_drive(sum_path, summary_file_name, GOOGLE_DRIVE_FOLDER_ID)
         upload_to_google_drive(raw_path, raw_file_name, GOOGLE_DRIVE_FOLDER_ID)
 
-    # Master fájlok feltöltése (Felülírja a Drive-on is a teljes adatbázist)
-    print(f"\n[4. LÉPÉS] MASTER fájlok szinkronizálása a Google Drive-ra...")
+    # 4. A Master Összegző fájl teljes újraépítése a Drive-on lévő ÖSSZES napi összegző alapján
+    rebuild_master_summary_from_all_files(master_sum_path, GOOGLE_DRIVE_FOLDER_ID)
+
+    # Master fájlok szinkronizálása a Google Drive-ra
+    print(f"\n[5. LÉPÉS] MASTER fájlok szinkronizálása a Google Drive-ra...")
     if os.path.exists(master_sum_path):
         upload_to_google_drive(master_sum_path, "amberlyn_MASTER_Osszegzes.xlsx", GOOGLE_DRIVE_FOLDER_ID)
     if os.path.exists(master_raw_path):
