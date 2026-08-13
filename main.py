@@ -200,6 +200,10 @@ def append_to_master_raw(master_path, daily_raw_path, payout_date):
     if not os.path.exists(daily_raw_path):
         return
     try:
+        # 1. Dátum kinyerése pontosan a fájlnévből ("amberlyn_YYYY-MM-DD.xlsx")
+        file_name_only = os.path.basename(daily_raw_path)
+        extracted_date = file_name_only.replace("amberlyn_", "").replace(".xlsx", "")
+
         daily_wb = openpyxl.load_workbook(daily_raw_path)
         daily_ws = daily_wb.active
 
@@ -208,25 +212,32 @@ def append_to_master_raw(master_path, daily_raw_path, payout_date):
             master_ws = master_wb.active
             master_ws.title = "Master Tranzakciók"
             
-            # Fejléc másolása + Egy Rendszer Dátum oszlop hozzáadása
+            # Fejléc másolása + Payout Dátum oszlop hozzáadása a legvégére
             header_row = list(next(daily_ws.iter_rows(min_row=1, max_row=1, values_only=True)))
-            header_row.append("API_Lekeres_Datuma")
+            header_row.append("Payout_Dátum")
             master_ws.append(header_row)
         else:
             master_wb = openpyxl.load_workbook(master_path)
             master_ws = master_wb.active
 
+            # Biztonsági ellenőrzés: ha egy korábbi Master fájlban hiányzik a Dátum fejléc, beírjuk
+            current_headers = list(next(master_ws.iter_rows(min_row=1, max_row=1, values_only=True)))
+            if "Payout_Dátum" not in current_headers and "API_Lekeres_Datuma" not in current_headers:
+                master_ws.cell(row=1, column=master_ws.max_column + 1, value="Payout_Dátum")
+
             # FELÜLÍRÁS: Visszafelé töröljük a régi sorokat, amik ehhez a naphoz tartoznak
+            date_col_idx = master_ws.max_column
             for row_idx in range(master_ws.max_row, 1, -1):
-                if master_ws.cell(row=row_idx, column=master_ws.max_column).value == payout_date:
+                if master_ws.cell(row=row_idx, column=date_col_idx).value == extracted_date:
                     master_ws.delete_rows(row_idx, 1)
 
-        # Új adatsorok hozzáfűzése a napi fájlból
+        # 2. Új adatsorok hozzáfűzése a napi fájlból
         for row_idx, row_values in enumerate(daily_ws.iter_rows(values_only=True), start=1):
             if row_idx < 2:  # Fejlécet átugorjuk
                 continue
             row_list = list(row_values)
-            row_list.append(payout_date)  # Hozzáadjuk a dátumot az utolsó oszlophoz
+            # 3. A fájlnévből kinyert dátum kerül a sor jobb szélére (utolsó oszlop)
+            row_list.append(extracted_date)  
             master_ws.append(row_list)
 
         master_wb.save(master_path)
