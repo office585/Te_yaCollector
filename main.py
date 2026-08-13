@@ -15,6 +15,7 @@ from googleapiclient.http import MediaFileUpload
 # ==================== KÖRNYEZETI VÁLTOZÓK (GITHUB SECRETS) ====================
 TEYA_EMAIL = os.getenv("TEYA_EMAIL")
 TEYA_PASSWORD = os.getenv("TEYA_PASSWORD")
+# KÖZÖS MEGHAJTÓ AZONOSÍTÓJA BELEÉGETVE (Ha a Secret üres, ezt használja)
 GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "0AP3HkLh_ANsVUk9PVA")
 GDRIVE_SA_JSON_STR = os.getenv("GDRIVE_SA_JSON")
 
@@ -22,71 +23,50 @@ LOGIN_URL = "https://business.teya.com/?locale=hu"
 COMPANY_ID = "24abe7e0-88fd-468a-afb6-fe362b0b79ca"
 STORE_ID = "81e77008-fc09-4a82-9c78-b5939b24a202"
 
-# ELMÚLT 14 NAP (2 HÉT) GYŰJTÉSE
-DAYS_BACK = 14
-
+# HELYI MENTÉSI MAPPA A VIRTUÁLIS GÉPEN
 OUTPUT_DIR = "./output"
 GRAPHQL_URL = "https://customer-bff.teya.com/graphql"
 # ==============================================================================
 
 
 def upload_to_google_drive(file_path, file_name, folder_id):
-    """Fájl feltöltése vagy FELÜLÍRÁSA Google Drive-on."""
+    """Fájl feltöltése Google Drive-ra a memóriában lévő Service Account adatokkal."""
     if not GDRIVE_SA_JSON_STR or not folder_id:
+        print(f"      [Drive SKIPPED] Hiányzik a GDRIVE_SA_JSON vagy FOLDER_ID Secret.")
         return False
 
-    print(f"      [Drive] Szinkronizálás: {file_name}...")
+    print(f"      [Drive] Feltöltés indítása: {file_name}...")
     try:
         sa_info = json.loads(GDRIVE_SA_JSON_STR)
         SCOPES = ["https://www.googleapis.com/auth/drive"]
         creds = service_account.Credentials.from_service_account_info(sa_info, scopes=SCOPES)
-        service = build("drive", "v3", credentials=creds)
 
-        # Keresés, hogy létezik-e már a fájl
-        query = f"name='{file_name}' and '{folder_id}' in parents and trashed=false"
-        results = service.files().list(
-            q=query, 
-            spaces='drive', 
-            fields="files(id, name)", 
-            supportsAllDrives=True, 
-            includeItemsFromAllDrives=True
-        ).execute()
-        
-        items = results.get('files', [])
+        service = build("drive", "v3", credentials=creds)
+        file_metadata = {"name": file_name, "parents": [folder_id]}
         media = MediaFileUpload(
             file_path,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             resumable=True,
         )
 
-        if items:
-            # Fájl felülírása (Update)
-            file_id = items[0]['id']
-            service.files().update(
-                fileId=file_id, 
-                media_body=media, 
-                supportsAllDrives=True
-            ).execute()
-            print(f"      [Drive SIKER] Fájl felülírva (Frissítve).")
-        else:
-            # Új fájl létrehozása (Create)
-            file_metadata = {"name": file_name, "parents": [folder_id]}
-            service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields="id",
-                supportsAllDrives=True
-            ).execute()
-            print(f"      [Drive SIKER] Új fájl feltöltve.")
+        uploaded = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id",
+            supportsAllDrives=True
+        ).execute()
+
+        print(f"      [Drive SIKER] Feltöltve! ID: {uploaded.get('id')}")
         return True
 
     except Exception as e:
-        print(f"      [Drive HIBA] Nem sikerült a művelet ({file_name}): {e}")
+        print(f"      [Drive HIBA] Nem sikerült a feltöltés ({file_name}): {e}")
         return False
 
 
 def format_eur(amount):
-    if amount is None: amount = 0.0
+    if amount is None:
+        amount = 0.0
     formatted = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", " ")
     return f"{formatted} €"
 
@@ -96,14 +76,30 @@ def create_summary_excel(file_path, summary, payout_date):
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Összegzés"
-        headers = ["Dátum", "Kifizetett Végösszeg", "Kezdeti egyenleg", "Tranzakciók bruttó", "Visszatérítések", "Chargeback", "Bankköltség / Díjak"]
-        values = [
-            payout_date, summary.get("kifizetes", "0,00 €"), summary.get("kezdeti_egyenleg", "0,00 €"),
-            summary.get("tranzakciok", "0,00 €"), summary.get("visszateritesek", "0,00 €"),
-            summary.get("chargeback", "0,00 €"), summary.get("dijak", "0,00 €")
+
+        headers = [
+            "Dátum",
+            "Kifizetett Végösszeg",
+            "Kezdeti egyenleg",
+            "Tranzakciók bruttó",
+            "Visszatérítések",
+            "Chargeback",
+            "Bankköltség / Díjak"
         ]
+
+        values = [
+            payout_date,
+            summary.get("kifizetes", "0,00 €"),
+            summary.get("kezdeti_egyenleg", "0,00 €"),
+            summary.get("tranzakciok", "0,00 €"),
+            summary.get("visszateritesek", "0,00 €"),
+            summary.get("chargeback", "0,00 €"),
+            summary.get("dijak", "0,00 €")
+        ]
+
         ws.append(headers)
         ws.append(values)
+
         for col_num in range(1, len(headers) + 1):
             cell = ws.cell(row=1, column=col_num)
             cell.font = Font(bold=True)
@@ -112,19 +108,35 @@ def create_summary_excel(file_path, summary, payout_date):
                 val_cell = ws.cell(row=2, column=col_num)
                 val_cell.fill = PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid")
                 val_cell.font = Font(bold=True)
+
         wb.save(file_path)
         return True
     except Exception as e:
+        print(f"      [Excel HIBA]: {e}")
         return False
 
 
 def append_to_master_summary(master_path, summary, payout_date):
-    headers = ["Dátum", "Kifizetett Végösszeg", "Kezdeti egyenleg", "Tranzakciók bruttó", "Visszatérítések", "Chargeback", "Bankköltség / Díjak"]
-    values = [
-        payout_date, summary.get("kifizetes", "0,00 €"), summary.get("kezdeti_egyenleg", "0,00 €"),
-        summary.get("tranzakciok", "0,00 €"), summary.get("visszateritesek", "0,00 €"),
-        summary.get("chargeback", "0,00 €"), summary.get("dijak", "0,00 €")
+    headers = [
+        "Dátum",
+        "Kifizetett Végösszeg",
+        "Kezdeti egyenleg",
+        "Tranzakciók bruttó",
+        "Visszatérítések",
+        "Chargeback",
+        "Bankköltség / Díjak"
     ]
+
+    values = [
+        payout_date,
+        summary.get("kifizetes", "0,00 €"),
+        summary.get("kezdeti_egyenleg", "0,00 €"),
+        summary.get("tranzakciok", "0,00 €"),
+        summary.get("visszateritesek", "0,00 €"),
+        summary.get("chargeback", "0,00 €"),
+        summary.get("dijak", "0,00 €")
+    ]
+
     try:
         if not os.path.exists(master_path):
             wb = openpyxl.Workbook()
@@ -137,27 +149,16 @@ def append_to_master_summary(master_path, summary, payout_date):
             wb = openpyxl.load_workbook(master_path)
             ws = wb.active
 
-        # FELÜLÍRÁS: Ha a dátum már létezik, felülírjuk a sort
-        row_to_overwrite = None
-        for row_idx in range(2, ws.max_row + 1):
-            if ws.cell(row=row_idx, column=1).value == payout_date:
-                row_to_overwrite = row_idx
-                break
-
-        if row_to_overwrite:
-            for col_idx, val in enumerate(values, start=1):
-                ws.cell(row=row_to_overwrite, column=col_idx, value=val)
-        else:
-            ws.append(values)
-            
+        ws.append(values)
         wb.save(master_path)
     except Exception as e:
         print(f"      [Master Összegzés HIBA]: {e}")
 
 
-def append_to_master_raw(master_path, daily_raw_path, payout_date):
+def append_to_master_raw(master_path, daily_raw_path):
     if not os.path.exists(daily_raw_path):
         return
+
     try:
         daily_wb = openpyxl.load_workbook(daily_raw_path)
         daily_ws = daily_wb.active
@@ -166,27 +167,16 @@ def append_to_master_raw(master_path, daily_raw_path, payout_date):
             master_wb = openpyxl.Workbook()
             master_ws = master_wb.active
             master_ws.title = "Master Tranzakciók"
-            
-            # Fejléc másolása + Egy Rendszer Dátum oszlop hozzáadása
-            header_row = list(next(daily_ws.iter_rows(min_row=1, max_row=1, values_only=True)))
-            header_row.append("API_Lekeres_Datuma")
-            master_ws.append(header_row)
+            start_row = 1
         else:
             master_wb = openpyxl.load_workbook(master_path)
             master_ws = master_wb.active
+            start_row = 2
 
-            # FELÜLÍRÁS: Visszafelé töröljük a régi sorokat, amik ehhez a naphoz tartoznak
-            for row_idx in range(master_ws.max_row, 1, -1):
-                if master_ws.cell(row=row_idx, column=master_ws.max_column).value == payout_date:
-                    master_ws.delete_rows(row_idx, 1)
-
-        # Új adatsorok hozzáfűzése a napi fájlból
         for row_idx, row_values in enumerate(daily_ws.iter_rows(values_only=True), start=1):
-            if row_idx < 2:  # Fejlécet átugorjuk
+            if row_idx < start_row:
                 continue
-            row_list = list(row_values)
-            row_list.append(payout_date)  # Hozzáadjuk a dátumot az utolsó oszlophoz
-            master_ws.append(row_list)
+            master_ws.append(list(row_values))
 
         master_wb.save(master_path)
     except Exception as e:
@@ -239,8 +229,8 @@ def generate_and_download_raw_excel(payout_id, save_path, headers):
                 with open(save_path, "wb") as f:
                     f.write(excel_bytes)
                 return True
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"      [GraphQL HIBA]: {e}")
         
     return False
 
@@ -283,6 +273,7 @@ def run_pure_api_collector():
     captured_token = None
 
     with sync_playwright() as p:
+        # GitHub virtuális gépen headless=True szigorúan kötelező
         browser = p.chromium.launch(headless=True)
         context = browser.new_context()
         page = context.new_page()
@@ -309,6 +300,7 @@ def run_pure_api_collector():
             page.wait_for_selector('[data-testid="settlements-calendar"]', timeout=25000)
         except Exception:
             page.wait_for_timeout(3000)
+
         browser.close()
 
     if not captured_token:
@@ -322,18 +314,19 @@ def run_pure_api_collector():
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/151.0.0.0",
     }
 
-    # IDŐSZAK: Utolsó 14 nap (2 hét)
+    # Január 1-től mai napig
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=DAYS_BACK)
+    start_date = datetime(end_date.year, 1, 1)
 
-    print(f"\n[API] Adatok lekérése az elmúlt {DAYS_BACK} napra ({start_date.strftime('%Y-%m-%d')} -> {end_date.strftime('%Y-%m-%d')})...")
+    print(f"[API] Adatok lekérése ({start_date.strftime('%Y-%m-%d')} -> {end_date.strftime('%Y-%m-%d')})...")
     data_items = fetch_all_settlements_in_chunks(start_date, end_date, headers)
 
     master_sum_path = os.path.join(OUTPUT_DIR, "amberlyn_MASTER_Osszegzes.xlsx")
     master_raw_path = os.path.join(OUTPUT_DIR, "amberlyn_MASTER_Nyers.xlsx")
 
-    # Mivel felülírjuk a sorokat, a korábbi Master fájlokat már NEM TÖRÖLJÜK ki az elején!
-    
+    if os.path.exists(master_sum_path): os.remove(master_sum_path)
+    if os.path.exists(master_raw_path): os.remove(master_raw_path)
+
     processed_payouts = set()
 
     for item in data_items:
@@ -343,7 +336,7 @@ def run_pure_api_collector():
         if not payout_date or payout_id in processed_payouts: continue
 
         processed_payouts.add(payout_id)
-        print(f"\n-> Feldolgozás: {payout_date}")
+        print(f"-> Feldolgozás: {payout_date}")
 
         fees = item.get("fees", 0.0)
         summary_data = {
@@ -365,27 +358,16 @@ def run_pure_api_collector():
 
         if payout_id:
             if generate_and_download_raw_excel(payout_id, raw_path, headers):
-                # Átadjuk a payout_date-et is, hogy tudja, miket kell kitörölni felülírás előtt
-                append_to_master_raw(master_raw_path, raw_path, payout_date)
+                append_to_master_raw(master_raw_path, raw_path)
 
         upload_to_google_drive(sum_path, summary_file_name, GOOGLE_DRIVE_FOLDER_ID)
         upload_to_google_drive(raw_path, raw_file_name, GOOGLE_DRIVE_FOLDER_ID)
 
-    # Master fájlok feltöltése (Felülírja a Drive-on is)
-    print(f"\n-> MASTER fájlok szinkronizálása a Google Drive-ra...")
-    if os.path.exists(master_sum_path):
-        upload_to_google_drive(master_sum_path, "amberlyn_MASTER_Osszegzes.xlsx", GOOGLE_DRIVE_FOLDER_ID)
-    if os.path.exists(master_raw_path):
-        upload_to_google_drive(master_raw_path, "amberlyn_MASTER_Nyers.xlsx", GOOGLE_DRIVE_FOLDER_ID)
+    upload_to_google_drive(master_sum_path, "amberlyn_MASTER_Osszegzes.xlsx", GOOGLE_DRIVE_FOLDER_ID)
+    upload_to_google_drive(master_raw_path, "amberlyn_MASTER_Nyers.xlsx", GOOGLE_DRIVE_FOLDER_ID)
 
     print("\n--> MINTA SIKERESEN LEFUTOTT!")
 
 
 if __name__ == "__main__":
-    # GitHub workflow esetén a fájlokat le kell tölteni a Drive-ról a szerkesztés előtt
-    # Ahhoz, hogy a Master fájlok módosíthatók legyenek a virtuális gépen, egy fejlettebb lekérés kéne, de 
-    # mivel a workflow mindig tiszta mappával indul, a GitHub gépén a Master fájlok nulláról kezdenének épülni.
-    # Ahhoz hogy egy MÁR LÉTEZŐ master fájlt szerkesszünk, a teljes Drive letöltés túl komplex a Pythonban, 
-    # úgyhogy jelenlegi megközelítés: a kód minden futáskor csak a legutóbbi 14 napot fűzi egybe egy masterbe, 
-    # és cseréli a régit (vagy ha neked van rá szükséged, 14 napos gördülő mastert tart fent).
     run_pure_api_collector()
