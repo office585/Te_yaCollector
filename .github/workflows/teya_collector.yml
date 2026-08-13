@@ -1,9 +1,11 @@
 name: Teya Data Collector to Google Drive
 
 on:
-  workflow_dispatch:  # Kézi indítás a GitHub felületén
+  workflow_dispatch:  # Marad a kézi indítás is, ha épp futtatni akarod
   schedule:
-    - cron: '0 6 * * *'  # Minden nap reggel 6:00 UTC-kor automatikusan lefut
+    # A szerverek UTC időzónában vannak. 
+    # UTC 05:00 = Magyar idő szerint (CEST) pontosan reggel 07:00 óra.
+    - cron: '0 5 * * *'
 
 jobs:
   run-collector:
