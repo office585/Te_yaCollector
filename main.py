@@ -15,7 +15,8 @@ from googleapiclient.http import MediaFileUpload
 # ==================== KÖRNYEZETI VÁLTOZÓK (GITHUB SECRETS) ====================
 TEYA_EMAIL = os.getenv("TEYA_EMAIL")
 TEYA_PASSWORD = os.getenv("TEYA_PASSWORD")
-GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+# KÖZÖS MEGHAJTÓ AZONOSÍTÓJA BELEÉGETVE (Ha a Secret üres, ezt használja)
+GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "0AP3HkLh_ANsVUk9PVA")
 GDRIVE_SA_JSON_STR = os.getenv("GDRIVE_SA_JSON")
 
 LOGIN_URL = "https://business.teya.com/?locale=hu"
